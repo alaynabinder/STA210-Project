@@ -1,0 +1,884 @@
+---
+title: "Factors of the Fleeing Status of Victims Among Fatal Shootings in the US"
+author: "NAXA: Alayna Binder, Natalie Ashton, Xiaoran Chen, Ayse Celebi"
+date: "Dec 11, 2023"
+format: pdf
+execute: 
+  warning: false
+  message: false
+  echo: false
+editor: visual
+---
+
+## Introduction and Data
+
+#### Motivation and Research Question
+
+Over 1,200 people in the United States have been fatally shot by the police in the last 12 months, amounting to over three fatal shootings per day, according to the Washington Post's Fatal Force Database. While devastatingly tragic, this is unfortunately not an uncommon occurrence. Since 2015, there have been over 9,000 fatal police shootings in the US tracked by the Post.
+
+The motivation behind this research stems from the pressing need to analyze and understand the dynamics of these fatal police shootings in the US. In recent years, this subject has quickly become a very prevalent issue given the need for accountability within police departments -- particularly in incidents involving people from minority backgrounds. In the wake of incidents like the 2014 shooting of Michael Brown in Ferguson, Missouri, the question of racial bias in fatal police shootings has drawn significant attention (VerBruggen). In addition to race, studies have also explored the role of mental health and firearm possession in these fatal encounters. Given the importance of this issue, this project aims to conduct a comprehensive analysis of fatal police shootings in the United States. By shedding light on this complex issue, this research contributes to the ultimate goal of fostering a more equitable and just society.
+
+Our research question is as follows: Among fatal shootings in the US over the last 8 years, is there a relationship between whether a victim tried to flee the scene and other factors related to the incident, such as the victim's age, gender, race, if they were armed, what they were doing before the incident, and whether they have a history of mental health issues?
+
+#### Data Description and Cleaning
+
+We are utilizing The Washington Post's Fatal Force Database, specifically its enhanced v2 dataset, which is updated daily by researchers at the Post. Every record requires at least two verified sources and is checked by Post editors before publishing. The dataset contains information about the death records for each victim, such as name, gender, age, race, and state. There is also information about the incident itself, such as if the victim fled, what the victim was doing leading up to the incident, if the victim was armed, and if they had a history of mental illness. The v2 version of the dataset was introduced in 2022 with the intention of enhancing data coverage and improving the quality and consistency of information. This is the version that we are using for our analysis. We scraped this data on October 26th, 2023, so the dates of our data range from January 2nd, 2015 to October 26th, 2023.
+
+To prepare the data for fitting models, we had to take certain steps to clean and wrangle the data. Many of our categorical variables (specifically race, what the victim was armed with, and victim flee group) had several levels, so we collapsed these into broader categories. For example, for the data describing what the victim was armed with, there were quite a few values that included multiple weapons (ex. "other;blunt_object;knife", "knife;vehicle"). We combined all of these into one categorical level called multiple. The original response variable, flee status, included the method as to which the victim tried to flee, but we are only interested in whether or not they attempted to flee for the purposes of our data analysis. Therefore, we transformed this into a binary variable with categories did not flee and fled. Lastly, we grouped the states in which the shootings occurred into regions: North, South, West, and Midwest.
+
+Another action we took was releveling each of our potential predictors, so that the level with the largest amount of observations would be the baseline in our model. This resulted in the following baselines: male for gender, White for race, gun for what the victim was armed with, no for if the incident was related to mental health, South for region, and shoot for the threat type.
+
+Furthermore, we considered several methods for addressing the missing data. Using the mice package, we imputed the numerical variable, victim age, in a manner that does not change its distribution. This imputation filled the missing data in through a process called predictive mean matching (PMM). PMM selects a data point from the nonmissing data that has a predicted value similar to the predicted value of the missing sample. The closest N values are considered, and ultimately one of those N values is chosen at random. Originally, we imputed the categorical variables by filling in the missing values with the most frequent value that occurred for that variable (mode imputation); however, we realized that this didn't take into account that the missing data might actually be statistically significant and affect the results that the most frequent values had on our response variable in our logistic regression, so we tried an alternative imputation method. We filled the missing values with the string "missing" to examine the effect that they have on our model overall. Finally, we had to handle the missing data in our response variable. 14% of the values for the victim flee group were missing. We decided to check to see if the missing data was random. To do this, we ran the same regression from our chosen model against a response variable of whether or not there was a value. The output of the model can be seen in appendix Figure 1. We found that this model had some significant factors, so we took this into consideration when interpreting the results. In light of this, we still decided to drop the missing values because there was a large number of initial observations (n = 8796).
+
+#### Key Variable Definitions
+
+-   `age`: age of victim (numerical)
+-   `gender`: gender of victim (binary)
+-   `race`: race of victim (categorical)
+-   `armed_with_grp`: if the victim was armed and, if so, with what (categorical)
+-   `was_mental_illness_related`: whether the victim had a history of mental illness or was experiencing a crisis at the time of the incident (binary)
+-   `threat_type`: actions the victim took leading up to the shooting (categorical)
+-   `region`: region of the US the shooting occurred in (categorical)
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(mice) # data imputation
+library(dplyr)
+library(knitr)
+library(patchwork)
+library(cowplot)
+library(rms)
+
+shootings_raw <- read_csv("data/fatal-police-shootings-data.csv")
+```
+
+```{r, results = 'hide'}
+#| label: data-imputation-and-missing-data
+
+# Impute numerical variable (age)
+shootings_impute_numerical <- shootings_raw |>
+  select(c(age, id))
+shootings_impute_numerical <- mice(shootings_impute_numerical, m = 1, method = "pmm", seed = 210)
+shootings_impute_numerical <- complete(shootings_impute_numerical, 1)
+
+# Select and make "missing" groups for categorical variables in model
+shootings_categorical <- shootings_raw |>
+  select(-c(date, city, county, latitude, longitude,
+            location_precision, name, age, race_source,
+            body_camera, agency_ids))
+
+shootings_categorical <- shootings_categorical |>
+  mutate(threat_type = replace_na(threat_type, "missing")) |>
+  mutate(armed_with = replace_na(armed_with, "missing")) |>
+  mutate(gender = replace_na(gender, "missing")) |>
+  mutate(race = replace_na(race, "Missing")) |>
+  mutate(was_mental_illness_related =
+           replace_na(was_mental_illness_related, "Missing"))
+
+# Rejoin to get working dataset
+shootings_dropped <- merge(shootings_impute_numerical,
+                   shootings_categorical, by = "id")
+
+# Drop NAs in response variable (`flee_status`)
+shootings_dropped <- shootings_dropped |> drop_na(flee_status)
+```
+
+```{r}
+#| label: data-cleaning
+
+# Changing response (`flee_status`) variable to be binary
+shootings_dropped <- shootings_dropped |>
+  mutate(flee_group = factor(recode(flee_status,
+    "car" = "Fled",
+    "foot" = "Fled",
+    "other" = "Fled",
+    "not" = "Did Not Flee"))) |>
+  relocate(flee_group, .after = flee_status)
+
+# Renaming `armed_with` categories 
+shootings_dropped <- shootings_dropped |>
+  mutate(armed_with_grp = case_when(
+    armed_with == "blunt_object" ~ "blunt_object",
+    armed_with == "gun" ~ "gun",
+    armed_with == "knife" ~ "knife",
+    armed_with == "other" ~ "other",
+    armed_with == "replica" ~ "replica",
+    armed_with == "vehicle" ~ "vehicle",
+    armed_with == "unarmed" ~ "unarmed",
+    armed_with == "unknown" ~ "unknown", # There was a weapon, we don't know what
+    armed_with == "undetermined" ~ "undetermined", # Don't know if there was a weapon or not
+    armed_with == "missing" ~ "missing",
+    armed_with == "blunt_object;blunt_object" |
+      armed_with == "blunt_object;knife" |
+      armed_with == "gun;knife" |
+      armed_with == "gun;vehicle" |
+      armed_with == "knife;blunt_object" |
+      armed_with == "knife;vehicle" |
+      armed_with == "other;blunt_object;knife" |
+      armed_with == "other;gun" |
+      armed_with == "replica;knife" |
+      armed_with == "replica;vehicle" |
+      armed_with == "vehicle;gun" |
+      armed_with == "vehicle;knife;other" ~ "multiple" )) |>
+  relocate(armed_with_grp, .after = armed_with)
+
+# Renaming `race` categories
+shootings_dropped <- shootings_dropped |>
+ mutate(race = recode(race,
+    "W" = "White",
+    "B" = "Black",
+    "H" = "Hispanic",
+    "A" = "Asian",
+    "N" = "Native American",
+    "O" = "Other", # multiracial, etc.,
+    "B;H" = "Other"))
+  
+# Renaming `was_mental_illness_related` categories
+shootings_dropped <- shootings_dropped |>
+  mutate(was_mental_illness_related = as.factor(was_mental_illness_related) |>
+           recode("TRUE" = "Yes",
+                  "FALSE" = "No"))
+
+# Adding regions
+shootings_dropped <- shootings_dropped |>
+  mutate(region = recode(state,
+  "MT" = "West", "OR" = "West", "ID" = "West", "WY" = "West", "CA" = "West",
+  "NV" = "West", "UT" = "West", "CO" = "West", "AZ" = "West", "NM" = "West",
+  "HI" = "West", "AK" = "West", "WA" = "West",
+  "ND" = "Midwest", "SD" = "Midwest", "MN" = "Midwest", "NE" = "Midwest",
+  "KS" = "Midwest", "MO" = "Midwest", "IA" = "Midwest", "WI" = "Midwest",
+  "MI" = "Midwest", "IL" = "Midwest", "IN" = "Midwest", "OH" = "Midwest",
+  "OK" = "South", "TX" = "South", "LA" = "South", "AR" = "South",
+  "TN" = "South", "GA" = "South", "FL" = "South", "SC" = "South",
+  "NC" = "South", "VA" = "South", "WV" = "South", "KY" = "South",
+  "MS" = "South", "MD" = "South", "AL" = "South", "DC" = "South",
+  "ME" = "North", "NH" = "North", "VT" = "North", "NY" = "North",
+  "PA" = "North", "DE" = "North", "NJ" = "North", "CT" = "North",
+  "MA" = "North", "RI" = "North")) |>
+ relocate(region, .after = state)
+
+# So that cross validation works properly, only one observation
+shootings_dropped <- subset(shootings_dropped, gender != "non-binary")
+```
+
+```{r}
+#making predictors into factors 
+shootings_dropped <- shootings_dropped |> 
+  mutate(gender = factor(gender)) |> 
+  mutate(threat_type = factor(threat_type)) |> 
+  mutate(was_mental_illness_related = factor(was_mental_illness_related)) |> 
+  mutate(race = factor(race)) |>
+  mutate(armed_with_grp = factor(armed_with_grp)) |>
+  mutate(region = factor(region))
+```
+
+```{r}
+#releveling predictors so greatest number of observations are baseline
+
+shootings_dropped$gender <- relevel(shootings_dropped$gender, ref = "male")
+shootings_dropped$race <- relevel(shootings_dropped$race, ref = "White")
+shootings_dropped$was_mental_illness_related <- relevel(shootings_dropped$was_mental_illness_related, ref = "No")
+shootings_dropped$threat_type <- relevel(shootings_dropped$threat_type, ref = "shoot")
+shootings_dropped$armed_with_grp <- relevel(shootings_dropped$armed_with_grp, ref = "gun")
+shootings_dropped$region <- relevel(shootings_dropped$region, ref = "South")
+```
+
+#### Exploratory Data Analysis
+
+Lets take an exploratory look into the data and variables pertaining to our research question.
+
+```{r}
+#| label: response-summary-stats
+
+shootings_dropped |>
+  group_by(flee_group) |>
+  summarise(Frequency = n(),
+            Percentage = n() / nrow(shootings_dropped) * 100) |>
+  arrange(desc(Frequency)) |>
+  kable(caption = paste("Frequency Table for",
+                      deparse(substitute(flee_group))))
+```
+
+Although the majority of victims did not flee (62%), a relatively large portion of victims did (38%). The number of victims who did not flee is approximately double those who did.
+
+```{r fig.height = 2.65, fig.width = 6}
+#| label: predictor-response-relationship
+
+# The relationships between the response variable and potential predictors
+
+# With numerical
+p1 <- ggplot(shootings_dropped, aes(x = age, y = flee_group, fill = flee_group)) +
+  geom_boxplot() +
+  labs(title = "Victim Age by\nFlee Status",
+       y = "Flee Status",
+       x = "Age of Victim") +
+  scale_fill_manual(values = c("Fled" = "steelblue", "Did Not Flee" = "indianred2")) +
+  guides(fill = "none")
+
+# ---------------------------------------------------------------------
+
+# With categorical
+p2 <- ggplot(shootings_dropped, aes(x = factor(was_mental_illness_related, labels = c("No", "Yes")), fill = flee_group)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Event Relation to\nMental Illness by\nFlee Status",
+       y = "Count",
+       x = "Event Related to\nMental Illness?",
+       fill = "Flee\nStatus") + 
+  scale_fill_manual(values = c("Fled" = "steelblue3", "Did Not Flee" = "indianred2")) +
+  theme(legend.position = "bottom")
+
+plot_grid(p1, p2, labels = c("A", "B"))
+```
+
+**Figure A** The median age appears to be slightly lower for those who fled, indicating that younger victims were more likely to flee than older victims. The age range for victims that did not flee extends to be older than the age range of victims that fled. This could indicate that age alone is not sufficient to predict a victim's flee status.
+
+**Figure B** More events were not related to mental illness than were. Furthermore, a higher percentage of people did not flee in events that were related to mental illness than in events that were not related to mental illness.
+
+```{r, fig.height = 2.9, fig.width = 5.5}
+#| label: interaction
+
+p3 <- ggplot(shootings_dropped, aes(x = age, y = threat_type, color = threat_type)) +
+  geom_boxplot() +
+  labs(title = "Victim Age by Threat Type",
+       y = "Threat Type",
+       x = "Age of Victim") + 
+  guides(color = FALSE)
+
+plot_grid(p3, labels = c("C"))
+```
+
+**Figure C** The median age differs slightly depending on the threat type, which describes the actions the victim took leading up to the fatal shooting. Victims that pointed a weapon at another individual, on average, were older than victims that made a threat of any other type. On the other hand, victims that did not make a threat (classified as an accident) were younger than other threat type groups.
+
+```{r, fig.height = 2.25, fig.width = 5}
+#| label: region-frequency
+
+p4 <- ggplot(shootings_dropped, aes(x = region, fill = region)) +
+  geom_bar() +
+  labs(x = "Region",
+       y = "Count",
+       title = "Frequency of US Shooting by Region")
+
+plot_grid(p4, labels = c("D"))
+```
+
+**Figure D** Out of all regions in the US, the most shootings occurred in the South, followed closely by the West. The Midwest had roughly half the number of shootings as the West, and the fewest occurred in the North.
+
+## Methodology
+
+```{r, results = 'hide'}
+#| label: split-data
+
+# Split data into training and testing
+set.seed(29)
+
+shooting_split <- initial_split(shootings_dropped)
+shooting_train <- training(shooting_split)
+shooting_test  <- testing(shooting_split)
+```
+
+```{r, results = 'hide'}
+#| label: recipe-model1
+
+# Create recipe for MODEL 1
+shooting_rec <- recipe(flee_group ~ 
+                      gender + race + age + armed_with_grp + 
+                      was_mental_illness_related + threat_type, 
+                      data = shooting_train) |>
+  step_center(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+# Create specification and workflow, then output model
+shooting_spec <- logistic_reg() |>
+  set_engine("glm")
+
+shooting_rec |>
+  prep() |>
+  bake(shooting_train) |>
+  glimpse()
+
+shooting_workflow <- workflow() |>
+  add_model(shooting_spec) |>
+  add_recipe(shooting_rec)
+
+shooting_fit <- shooting_workflow |>
+  fit(data = shooting_train) 
+
+shooting_fit |>
+  tidy() |>
+  kable(digits = 3)
+```
+
+```{r, results = 'hide'}
+#| label: recipe-model2
+
+# Create recipe for MODEL 2
+shooting_rec2 <- recipe(flee_group ~ 
+                      gender + race + age + armed_with_grp + 
+                      was_mental_illness_related + threat_type + region,
+                      data = shooting_train) |>
+  step_center(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+# Create workflow, then output model
+shooting_rec2 |>
+  prep() |>
+  bake(shooting_train) |>
+  glimpse()
+
+shooting_workflow2 <- workflow() |>
+  add_model(shooting_spec) |>
+  add_recipe(shooting_rec2)
+
+shooting_fit2 <- shooting_workflow2 |>
+  fit(data = shooting_train) 
+
+shooting_fit2 |>
+  tidy() |>
+  kable(digits = 3)
+```
+
+```{r, results = 'hide'}
+#| label: recipe-model3
+
+# Create recipe for MODEL 3
+shooting_rec3 <- recipe(flee_group ~ 
+                      gender + race + age + armed_with_grp + 
+                      was_mental_illness_related + threat_type,
+                      data = shooting_train) |>
+  step_center(all_numeric_predictors()) |>
+  step_interact(terms =~ age:threat_type) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+# Create workflow, then output model
+shooting_rec3 |>
+  prep() |>
+  bake(shooting_train) |>
+  glimpse()
+
+shooting_workflow3 <- workflow() |>
+  add_model(shooting_spec) |>
+  add_recipe(shooting_rec3)
+
+shooting_fit3 <- shooting_workflow3 |>
+  fit(data = shooting_train) 
+
+```
+
+We want to look at whether a victim's age, gender, race, what weapon(s) they were armed with, what actions they took leading up to the fatal shooting, and if their behavior during the shooting was related to mental illness can help predict whether or not the victim attempted to flee the scene. We chose these predictors because since attempting to flee or not is a choice that each victim made, we thought that the different factors related to their police encounter, i.e. whether or not they were armed and what they were doing leading up the the encounter, as well as their characteristics, i.e. race, age, gender, relation to mental illness could all have influence on the decision they made during the fatality. To accomplish this, we wanted to consider a model with the victim flee group (did not flee or fled) as the response variable and the six aforementioned variables as predictors. We chose logistic regression because the response variable is binary. Additionally, based on the findings in our EDA, we considered two other models that included all of the predictors from the first model as well as the region the fatality occurred in for the second model and an interaction between victim age and the action the victim took leading up to the fatality for the third model.
+
+We followed the logistic regression workflow. After splitting the data into training and testing sets, we created recipes for each of the three potential models and then conducted 10-fold cross validation on them.
+
+After creating each of the recipes, we had to check for any instances of multicollinearity in the models. We did this by calculating the VIF for all levels of the predictor variables. If any of these are over ten, then it means that there is a correlation between that predictor and another in the model, which we don't want. We found that there was one high VIF for the flee threat type level within the third model, however we eventually selected the first model, so this does not have any impact our inference. The rest of the VIFs for all three model were under five. The extended output for each of the three models can be seen in appendix Figure 3.
+
+We calculated the metrics associated with the cross validation (accuracy and ROC) as well as using drop in deviance tests and AIC and BIC values in order to aid us in the model selection process. The accuracy was the highest for Model 1 and the ROC is fairly similar for all three models with it being the highest for Model 2. We decided to look at more model fit statistics because these metrics were not enough for us to conclude which model is the best fit for our data.
+
+```{r, results = 'hide'}
+#| label: term-evaluation
+
+dev_1 <- glance(shooting_fit)$deviance
+
+# Model 1 vs. 2
+dev_2 <- glance(shooting_fit2)$deviance
+test_stat <- dev_1 - dev_2
+pchisq(test_stat, 3, lower.tail = FALSE)
+ # kable(digits = 3, caption = "Test Statistic for Model 2 vs. Model 1")
+# Non-significant p-value, don't add region
+
+# Model 1 vs. 3
+dev_3 <- glance(shooting_fit3)$deviance
+test_stat2 <- dev_1 - dev_3
+pchisq(test_stat2, 8, lower.tail = FALSE)
+#  kable(digits = 3, caption = "Test Statistic for Model 3 vs. Model 1")
+# Highly significant p-value, 0.0008
+# We negate this with favoring parsimony and the fact that none of the
+# added interactions are significant
+# AKA don't add interaction
+```
+
+```{r}
+values <- tibble("Comparison" = c("Model 1 vs. Model 2", "Model 1 vs. Model 3"),
+       "Test Statistic" = c(test_stat, test_stat2), 
+       "p_value" = c(pchisq(test_stat, 3, lower.tail = FALSE), pchisq(test_stat2, 8, lower.tail = FALSE)))
+
+values |> kable(digits = 3, caption = "Results from Drop in Deviance Tests")
+```
+
+We used two drop-in-deviance tests (output shown above) to evaluate whether the extra predictors in our second and third models did not have coefficients of 0 (i.e. are important). We compared the second and third nested models to the first model because all the predictors of the first model were in the second and third. The test between the first and second model did not have a significant p-value, according to a threshold of 0.05, so we determined that we should not add region to our model. The p-value for the test between the first and third model was very small, indicating that the interaction terms were significant, however other statistics that we will talk about later led us to the conclusion that Model 1 was a better fit for our data and the conclusion from this test can be negated by the fact that we also value parsimony and thus prefer more simplistic models.
+
+```{r, results = 'hide'}
+#| label: model-comparison
+
+# We technically don't need this after cross validation, but interesting
+# to look at
+glance(shooting_fit)$AIC
+glance(shooting_fit2)$AIC
+glance(shooting_fit3)$AIC
+
+glance(shooting_fit)$BIC
+glance(shooting_fit2)$BIC
+glance(shooting_fit3)$BIC
+```
+
+```{r}
+metrics <- tibble(Model = c("Model 1", "Model 2", "Model 3"),
+       AIC = c(glance(shooting_fit)$AIC, glance(shooting_fit2)$AIC, 
+               glance(shooting_fit2)$AIC),
+       BIC = c(glance(shooting_fit)$BIC, glance(shooting_fit2)$BIC, 
+               glance(shooting_fit3)$BIC))
+
+metrics |> kable(digits = 3, caption = "AIC and BIC for Potential Models")
+```
+
+After calculating the AIC and BIC for all three models (shown above), the AIC for the Model 3 was the highest and the AIC was almost identical for Model 1 and Model 2. The BIC for Model 1, however, was lower than both the second and third models, which we expected given that both the second and third models had an additional predictor with multiple levels and BIC has a harsher penalty for additional terms. Taking all of these tests and calculations into consideration, we decided that Model 1 was the best fit for our data.
+
+```{r, results = 'hide'}
+#| label: final-model-prep
+
+# Fit model to entire training set
+shooting_fit <- shooting_workflow |>
+  fit(shooting_train)
+
+tidy(shooting_fit) |>
+  kable(digits = 3)
+```
+
+## Results
+
+After the model selection process, we decided that the first model with our initial predictor variables was the best out of the three models that we considered. Now, we need to check the model performance for our chosen model.
+
+```{r, results = 'hide'}
+#| label: augment
+
+shooting_aug <- augment(shooting_fit, new_data = shooting_test)
+shooting_aug |> select(contains("pred"))
+```
+
+```{r}
+#| label: confusion-matrix
+
+shooting_conf <- shooting_aug |> 
+  count(flee_group, .pred_class, .drop = FALSE) |>
+  pivot_wider(names_from = .pred_class, values_from = n)
+shooting_conf |> kable(digits = 3, caption = "Confusion Matrix")
+```
+
+We created a confusion matrix (shown above) to calculate the misclassification rate of our model, as well as an ROC curve with the respective AUC value (seen below) to evaluate the performance of our model. Based on the misclassification rate, 31.23% of the data was incorrectly predicted by our model, meaning that 68.77% was correctly predicted.
+
+```{r fig.height = 3, fig.width = 6}
+#| label: ROC
+
+shooting_pred <- predict(shooting_fit, shooting_test, type = "prob")|>
+  bind_cols(shooting_test)
+
+p1 <- shooting_pred |>
+  roc_curve(
+    truth = flee_group,
+    .pred_Fled,
+    event_level = "second"
+  ) |>
+  autoplot()
+
+tibble <- shooting_pred |>
+  roc_auc(
+  truth = flee_group,
+  .pred_Fled,
+  event_level = "second"
+) |> kable(digits = 3, caption = "AUC Value from Curve")
+
+p1
+tibble
+```
+
+The ROC curve and AUC of 0.74 for our chosen model are displayed above. This is a fairly good AUC, both in general, and in relation to our other two models. This indicates that our model is efficient and performs well when distinguishing between positive and negative classes. Overall, we can conclude our model is a fairly good fit for the data; however, with more time and/or data we could make improvements, which we will expand upon in the discussion.
+
+Finally, there are three conditions that the model needs to meet in order for us to continue with inference: independence, randomness, and linearity.
+
+The independence condition is met because the dataset that we are using looks at individual cases of fatal police shootings in the US, so none of the observations are influenced by each other.
+
+Based on our dataset, the observations are not random compared to the average population. This makes sense because the observations represent people who were shot in police encounters, which is not necessarily something that would happen at random to anyone. However, because we are not interested in using this model for prediction, but just to gain insight into previous patterns, this is not an issue. Nonetheless, one way that this data could be considered random is if the population that we are considering is people who have encounters with police, then we can conclude that the people who got shot were random because police should not be specifically targeting victims. There are caveats to this in modern day, but for the sake of our project we will consider that to be true.
+
+For linearity, we need to check whether or not each level of our categorical response variable has a linear relationship with the numerical predictor variable age. To do this, we created two empirical logit plots, which can be seen in Figure 4 of the appendix. Based on both plots there seems to be a linear relationship between the two levels of the response variable and age, so the linearity condition is met.
+
+Because all three conditions are met, we are able to use the model for inference. We fit the model, and the output is shown below.
+
+```{r}
+#| label: final-model-output
+
+shooting_fit |>
+  tidy() |>
+  kable(digits = 3)
+```
+
+The model output revealed several interesting findings. The coefficient for age is statistically significant; for each additional year in age, the odds that a victim attempts to flee is expected to multiply by a factor of `r round(exp(-0.032), 3)`, holding all else constant. The coefficient for gender is also statistically significant; the odds that a female victim attempts to flee is expected to be `r round(exp(-0.438), 3)` times the odds of a male victim, holding all else constant. The only statistically significant level for race was Asian; the odds that an Asian victim attempts to flee is expected to be `r round(exp(-0.752), 3)` times the odds of a White victim, holding all else constant. With a victim having a gun as the baseline for the predictor variable of what the victim was armed with, almost all other levels of this predictor are statistically significant. The model suggests that individuals armed with a blunt object, knife, vehicle, multiple items, a replica weapon, or an other non-firearm weapon have different odds of fleeing compared to those armed with guns, specifically the odds of them fleeing are expected to multiply by a factor of `r round(exp(-1.246), 3)`, `r round(exp(-1.257), 3)`, `r round(exp(1.672), 3)`, `r round(exp(1.035), 3)`, `r round(exp(-0.717), 3)`, and `r round(exp(-1.009), 3)` respectively, holding all else constant. The threat type level of point is also statistically significant; the odds that a victim pointing a gun at someone when the police arrived on the scene attempts to flee is expected to be `r round(exp(-0.211), 3)` times the odds of a victim who shot someone, holding all else constant. Finally, whether or not the accident was related to mental illness is statistically significant; the odds that a victim with an event related to mental illness attempts to flee is `r round(exp(-1.050), 3)` times the odds of a victim with an event unrelated to mental illness, holding all else constant.
+
+## Discussion
+
+Overall, from our model, we concluded the following: The odds of a victim attempting to flee the scene are expected to increase when the victim is armed with multiple objects or has a vehicle. Both of these conclusions are compared to the baseline and holding all else constant. On the other hand, the odds of a victim attempting to flee the scene are expected to decrease if the victim is younger, female, Asian, if they were armed with a knife, blunt object, a replica weapon, or other non-firearm weapon, if the event was related to mental illness, and finally if they were pointing a weapon when the officer arrived on the scene. Again, this is all compared to the baseline and holding all other factors constant. The specific statistics behind these conclusions are discussed in the results section above. Even though we came to these conclusions, there were many limitations of our model, so these conclusions may not be completely accurate.
+
+The first limitation is the fact that we had to drop 14% of the response variable. As mentioned before, when checking to see if the missing data was random, we found that there were statistically significant variables. The model output revealed that some of the missing variables for applicable categorical predictors were also significant in our model and the coefficients were the same sign, which means that the model may be undercounting these specific predictors when classifying whether or not a victim will flee.
+
+The dataset is also continually changing because observations are being added everyday. Thus, the conclusions that we drew from the model will also likely be changing, especially as time elapses. A positive of this is that over time, more and more data will be collected, which could help make the model more accurate or give us the ability to improve our model.
+
+Finally, there are many other factors that could potentially have an effect on whether or not a victim would attempt to flee that are not included in the data, such as how many police encounters a victim had before the incident, their socioeconomic status, or even their feelings toward/level of trust in police officers (qualitative). The model that we used to draw our conclusions does not include any of these factors, since we did not have data on them, so these are likely not the only statistically significant factors for determining whether of not a victim attempted to flee the scene of a fatal police shooting.
+
+An idea for future work could be looking to see if these conclusions are generalizable to all police encounters, including those that do not result in a fatality. This would be interesting to look at, as less than .002% of police encounters result in fatalities, which is an extremely small subset of all encounters. This may prove to be difficult because such a dataset will likely not be as readily publicly available like the Fatal Force Database put together by the Washington Post, which would require creating our own dataset. However, we believe this would yield interesting results and is worth researching further.
+
+## References
+
+Pipis, George. "How to Impute Missing Values in R: R-Bloggers." R-Bloggers, 18 Apr. 2020, www.r-bloggers.com/2020/04/how-to-impute-missing-values-in-r/.
+
+The Washington Post. "Every Fatal Police Shooting since 2015." *The Washington Post*, 2022, www.washingtonpost.com/graphics/investigations/police-shootings-database/.
+
+VerBruggen, Robert. "Fatal Police Shootings and Race: A Review of the Evidence and Suggestions for Future Research." *Manhattan Institute*, 9 Mar. 2022, manhattan.institute/article/fatal-police-shootings-and-race-a-review-of-the-evidence-and-suggestions-for-future-research.
+
+\pagebreak
+
+## Appendix
+
+```{r, results = 'hide'}
+#| label: old-data-imputation
+
+# Create dataframes with only variables to be imputed 
+shootings_impute_numerical <- shootings_raw |>
+  select(c(age, id))
+
+shootings_impute_categorical <- shootings_raw |>
+  select(-c(date, city, county, state, latitude, longitude,
+            location_precision, name, age, race_source,
+            body_camera, agency_ids, flee_status))
+
+# Temporary dataframe to address Dr. Tackett's feedback
+shootings_impute_categorical_temp <- shootings_raw |>
+  select(c(id, flee_status))
+
+# ---------------------------------------------------------------------
+
+# Impute data for numerical variable (age)
+shootings_impute_numerical <- mice(shootings_impute_numerical, m = 1, method = "pmm", seed = 210)
+shootings_impute_numerical <- complete(shootings_impute_numerical, 1)
+
+# Impute data for flee_status
+getmode <- function(v) {
+  v = v[nchar(as.character(v)) > 0]
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+for (cols in colnames(shootings_impute_categorical_temp)) {
+  if (cols %in% names(shootings_impute_categorical_temp[, sapply(shootings_impute_categorical_temp, is.character)])) {
+    shootings_impute_categorical_temp <- shootings_impute_categorical_temp |>
+      mutate(!!cols := ifelse(
+        is.na(!!rlang::sym(cols)) |
+          !!rlang::sym(cols) == "",
+        getmode(!!rlang::sym(cols)),
+        !!rlang::sym(cols)))
+  }
+}
+
+# NOTE: This code is modified from George Pipis in R-bloggers.
+# Please refer to the formal citation in the References for more 
+# detailed information.
+
+# Based on Dr. Tackett's feedback
+shootings_impute_categorical <- shootings_impute_categorical |>
+  mutate(threat_type = replace_na(threat_type, "missing")) |>
+  mutate(armed_with = replace_na(armed_with, "missing")) |>
+  mutate(gender = replace_na(gender, "missing")) |>
+  mutate(race = replace_na(race, "Missing")) |>
+  mutate(was_mental_illness_related =
+           replace_na(was_mental_illness_related, "Missing"))
+
+# ---------------------------------------------------------------------
+
+# Join imputed datasets to get working dataset
+shootings <- merge(shootings_impute_numerical,
+                   shootings_impute_categorical, by = "id")
+
+# Another join to address Dr. Tackett's feedback
+shootings <- merge(shootings,
+                   shootings_impute_categorical_temp, by = "id")
+
+# Re-add variables
+shootings_notImputed <- shootings_raw |>
+  select(c(id, date, city, county, state, latitude, longitude,
+            location_precision, name, race_source,
+            body_camera, agency_ids))
+
+shootings <- merge(shootings, shootings_notImputed, by = "id")
+```
+
+```{r, results = 'hide'}
+#| label: checking-randomness-of-missing-response-variable
+
+shootings_impute_numerical_1 <- shootings_raw |>
+  select(c(age, id))
+shootings_impute_numerical_1 <- mice(shootings_impute_numerical_1, m = 1, method = "pmm", seed = 210)
+shootings_impute_numerical_1 <- complete(shootings_impute_numerical_1, 1)
+
+shootings_missing <- shootings_raw |>
+  mutate(threat_type = replace_na(threat_type, "missing")) |>
+  mutate(armed_with = replace_na(armed_with, "missing")) |>
+  mutate(gender = replace_na(gender, "missing")) |>
+  mutate(race = replace_na(race, "Missing")) |>
+  mutate(was_mental_illness_related =
+           replace_na(was_mental_illness_related, "Missing"))
+
+shootings_check <- merge(shootings_impute_numerical_1,
+                   shootings_missing, by = "id")
+
+shootings_check <- shootings_missing |>   mutate(flee_status = replace_na(flee_status, "missing"))
+```
+
+```{r}
+# Changing `flee_status` (response variable) to be binary
+shootings_check <- shootings_check |>
+  mutate(flee_group = recode(flee_status,
+    "car" = "Not",
+    "foot" = "Not",
+    "other" = "Not",
+    "not" = "Not",
+    "missing" = "Missing")) |>
+  relocate(flee_group, .after = flee_status)
+
+# Renaming `armed_with` categories 
+shootings_check <- shootings_check |>
+  mutate(armed_with_grp = case_when(
+    armed_with == "blunt_object" ~ "blunt_object",
+    armed_with == "gun" ~ "gun",
+    armed_with == "knife" ~ "knife",
+    armed_with == "other" ~ "other",
+    armed_with == "replica" ~ "replica",
+    armed_with == "vehicle" ~ "vehicle",
+    armed_with == "unarmed" ~ "unarmed",
+    armed_with == "unknown" ~ "unknown", # there was a weapon, we don't know what
+    armed_with == "undetermined" ~ "undetermined", # don't know if there was a weapon or not
+    armed_with == "missing" ~ "missing",
+    armed_with == "blunt_object;blunt_object" |
+      armed_with == "blunt_object;knife" |
+      armed_with == "gun;knife" |
+      armed_with == "gun;vehicle" |
+      armed_with == "knife;blunt_object" |
+      armed_with == "knife;vehicle" |
+      armed_with == "other;blunt_object;knife" |
+      armed_with == "other;gun" |
+      armed_with == "replica;knife" |
+      armed_with == "replica;vehicle" |
+      armed_with == "vehicle;gun" |
+      armed_with == "vehicle;knife;other" ~ "multiple" )) |>
+  relocate(armed_with_grp, .after = armed_with)
+
+# Renaming `race` categories
+shootings_check <- shootings_check |>
+ mutate(race = recode(race,
+    "A" = "Asian",
+    "B" = "Black",
+    "B;H" = "Other", # multiracial
+    "H" = "Hispanic",
+    "N" = "Native American",
+    "O" = "Other", # multiracial, etc.
+    "W" = "White"))
+
+# Renaming `was_mental_illness_related` categories
+shootings_check <- shootings_check |>
+  mutate(was_mental_illness_related = as.factor(was_mental_illness_related) |>
+           recode("TRUE" = "Yes",
+                  "FALSE" = "No"))
+
+# Adding regions
+shootings_check <- shootings_check |>
+  mutate(region = recode(state,
+  "MT" = "West",
+  "OR" = "West",
+  "ID" = "West",
+  "WY" = "West",
+  "CA" = "West",
+  "NV" = "West",
+  "UT" = "West",
+  "CO" = "West",
+  "AZ" = "West",
+  "NM" = "West",
+  "HI" = "West",
+  "AK" = "West",
+  "WA" = "West",
+  "ND" = "Midwest",
+  "SD" = "Midwest",
+  "MN" = "Midwest",
+  "NE" = "Midwest",
+  "KS" = "Midwest",
+  "MO" = "Midwest",
+  "IA" = "Midwest",
+  "WI" = "Midwest",
+  "MI" = "Midwest",
+  "IL" = "Midwest",
+  "IN" = "Midwest",
+  "OH" = "Midwest",
+  "OK" = "South",
+  "TX" = "South",
+  "LA" = "South",
+  "AR" = "South",
+  "TN" = "South",
+  "GA" = "South",
+  "FL" = "South",
+  "SC" = "South",
+  "NC" = "South",
+  "VA" = "South",
+  "WV" = "South",
+  "KY" = "South",
+  "MS" = "South",
+  "MD" = "South",
+  "AL" = "South",
+  "DC" = "South",
+  "ME" = "North",
+  "NH" = "North",
+  "VT" = "North",
+  "NY" = "North",
+  "PA" = "North",
+  "DE" = "North",
+  "NJ" = "North",
+  "CT" = "North",
+  "MA" = "North",
+  "RI" = "North")) |>
+ relocate(region, .after = state)
+```
+
+```{r}
+# Split data into training and testing
+set.seed(29)
+
+shooting_split_check <- initial_split(shootings_check)
+shooting_train_check <- training(shooting_split_check)
+shooting_test_check  <- testing(shooting_split_check)
+```
+
+```{r, results = 'hide'}
+# Create recipe for MODEL 1
+shooting_rec_check <- recipe(flee_group ~ 
+                      gender + race + age + armed_with_grp + 
+                      was_mental_illness_related + threat_type, 
+                      data = shooting_train_check) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+# Create specification and workflow, output model
+shooting_spec <- logistic_reg() |>
+  set_engine("glm")
+
+shooting_rec_check |>
+  prep() |>
+  bake(shooting_train_check) |>
+  glimpse()
+
+shooting_workflow_check <- workflow() |>
+  add_model(shooting_spec) |>
+  add_recipe(shooting_rec)
+
+shooting_fit_check <- shooting_workflow_check |>
+  fit(data = shooting_train_check)
+```
+
+#### Figure 1: Model for Checking if Response Variable is Missing at Random
+
+```{r}
+shooting_fit_check |>
+  tidy() |>
+  kable(digits = 3)
+```
+
+#### Figure 2: Cross Validation for Models 1-3
+
+```{r}
+#| label: cross-validation-model1
+
+set.seed(210)
+
+# Create folds
+folds <- vfold_cv(shooting_train, v = 10)
+
+# Conduct cross validation
+shootings_fit_rs <- shooting_workflow |>
+fit_resamples(resamples = folds)
+
+# Summarize the metrics from your CV resamples
+tibble <- collect_metrics(shootings_fit_rs, summarize = TRUE)
+
+tibble |> kable(digits = 3, caption = "Cross Validation Metrics from Model 1")
+
+# We choose Model 1, while ROC is slightly lower than Model 2,
+# accuracy is higher. We eliminate Model 3 based on parsimony and AIC/BIC
+```
+
+```{r}
+#| label: cross-validation-model2
+
+set.seed(210)
+
+# Create folds
+folds <- vfold_cv(shooting_train, v = 10)
+
+# Conduct cross validation
+shootings_fit_rs2 <- shooting_workflow2 |>
+fit_resamples(resamples = folds)
+
+# Summarize the metrics from your CV resamples
+tibble <- collect_metrics(shootings_fit_rs2, summarize = TRUE)
+
+tibble |> kable(digits = 3, caption = "Cross Validation Metrics from Model 2")
+```
+
+```{r}
+#| label: cross-validation-model3
+
+set.seed(210)
+
+# Create folds
+folds <- vfold_cv(shooting_train, v = 10)
+
+# Conduct cross validation
+shootings_fit_rs3 <- shooting_workflow3 |>
+fit_resamples(resamples = folds)
+
+# Summarize the metrics from your CV resamples
+tibble <- collect_metrics(shootings_fit_rs3, summarize = TRUE)
+
+tibble |> kable(digits = 3, caption = "Cross Validation Metrics from Model 3")
+
+# Cross validation not fully functional because of interaction, but
+# we have used other methods to confirm that this is not the best model
+```
+
+#### Figure 3: Check for Multicollinearity
+
+```{r}
+#| label: multicollinearity
+
+shooting_fit_model <- extract_fit_parsnip(shooting_fit)
+vif(shooting_fit_model$fit) |> 
+  kable(digits = 3, caption = "VIF Levels for Model 1")
+
+shooting_fit_model2 <- extract_fit_parsnip(shooting_fit2)
+vif(shooting_fit_model2$fit) |> 
+  kable(digits = 3, caption = "VIF Levels for Model 2")
+
+shooting_fit_model3 <- extract_fit_parsnip(shooting_fit3)
+vif(shooting_fit_model3$fit) |> 
+  kable(digits = 3, caption = "VIF Values for Model 3")
+```
+
+#### Figure 4: Empirical Logit Plots
+
+```{r}
+shootings_dropped <- shootings_dropped |>
+  mutate(
+    Fled = factor(if_else(flee_group == "Fled", "1", "0")),
+    Did_not_flee = factor(if_else(flee_group == "Did Not Flee", "1", "0")),
+  )
+library(Stat2Data)
+emplogitplot1(Fled ~ age, data = shootings_dropped, 
+              ngroups = 10, main = "Fled vs. Age")
+emplogitplot1(Did_not_flee ~ age, data = shootings_dropped, 
+              ngroups = 5, main = "Did Not Flee vs. Age")
+```
